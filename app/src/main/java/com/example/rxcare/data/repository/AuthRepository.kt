@@ -7,12 +7,14 @@ import com.example.rxcare.data.remote.dto.AuthResponse
 import com.example.rxcare.data.remote.dto.LoginRequest
 import com.example.rxcare.data.remote.dto.RegisterPharmacistRequest
 import com.example.rxcare.data.remote.dto.RegisterRequest
+import com.example.rxcare.data.remote.websocket.WebSocketClient
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 class AuthRepository(
-    private val preferencesManager: PreferencesManager
+    private val preferencesManager: PreferencesManager,
+    private val webSocketClient: WebSocketClient = WebSocketClient()
 ) {
     
     private var cachedToken: String? = null
@@ -61,6 +63,7 @@ class AuthRepository(
     
     suspend fun registerPharmacist(email: String, password: String, name: String): Result<Unit> {
         return try {
+            refreshAuthToken()
             val request = RegisterPharmacistRequest(email, password, name)
             val response = authApi.registerPharmacist(request)
             
@@ -75,6 +78,9 @@ class AuthRepository(
     }
     
     suspend fun logout() {
+        // Disconnect WebSocket connections before clearing session
+        webSocketClient.disconnect()
+        
         cachedToken = null
         preferencesManager.clearUserSession()
     }

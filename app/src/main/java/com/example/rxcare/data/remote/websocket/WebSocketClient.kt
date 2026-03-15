@@ -74,6 +74,10 @@ class WebSocketClient(
         userSocket?.send(gson.toJson(action))
     }
     
+    fun ping() {
+        userSocket?.send("{\"type\":\"ping\"}")
+    }
+    
     fun disconnect() {
         globalPharmacistSocket?.close(1000, "Client disconnect")
         userSocket?.close(1000, "Client disconnect")

@@ -20,6 +20,7 @@ interface ChatRepository {
     fun reconnectWebSockets(userId: String, userRole: String, token: String)
     fun claimChat(chatId: String, pharmacistId: String)
     fun sendMessage(chatId: String, senderId: String, content: String, imageUrl: String? = null)
+    fun ping()
     suspend fun getAuthToken(): String
     suspend fun getUserRole(): String
 }

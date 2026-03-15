@@ -18,19 +18,19 @@ class ChatViewModel(
     private val chatRepository: ChatRepository,
     private val currentUserId: String
 ) : ViewModel() {
-    
+
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
-    
+
     private val _chats = MutableStateFlow<List<Chat>>(emptyList())
     val chats: StateFlow<List<Chat>> = _chats.asStateFlow()
-    
+
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
-    
+
     private val _currentChat = MutableStateFlow<Chat?>(null)
     val currentChat: StateFlow<Chat?> = _currentChat.asStateFlow()
-    
+
     private val _messageText = MutableStateFlow("")
     val messageText: StateFlow<String> = _messageText.asStateFlow()
 
@@ -65,43 +65,49 @@ class ChatViewModel(
         }
     }
 
-    fun selectChat(chatId: String) {
-        // Find the chat in current list or create a basic chat object
-        val chat = _chats.value.find { it.id == chatId } ?: Chat(
-            id = chatId,
-            participant1Id = currentUserId,
-            participant2Id = "Unknown",
-            lastMessage = null,
-            lastMessageTime = System.currentTimeMillis(),
-            status = "ACTIVE"
-        )
-        
-        // Update participant IDs to include current user
-        val updatedChat = chat.copy(
-            participant1Id = currentUserId,
-            participant2Id = if (chat.participant2Id != currentUserId) chat.participant2Id else chat.participant1Id
-        )
-        _currentChat.value = updatedChat
-        loadMessages(chatId)
+    fun selectChat(chatId: String, initialStatus: String? = null) {
+        viewModelScope.launch {
+            try {
+                // Set initial status if provided
+                initialStatus?.let { status ->
+                    _uiState.value = _uiState.value.copy(chatStatus = status)
+                }
+                
+                // Just load messages for the given chatId
+                // The chat data should be passed from the home screen navigation
+                loadMessages(chatId)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun setInitialChatStatus(status: String) {
+        _uiState.value = _uiState.value.copy(chatStatus = status)
+    }
+
+    fun setCurrentChat(chat: Chat) {
+        _currentChat.value = chat
     }
 
     private fun loadMessages(chatId: String) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
             try {
+                _currentChat.value = Chat(id = chatId, participant1Id = "", participant2Id = "")
                 val result = chatRepository.getChatHistory(chatId)
                 result.fold(
                     onSuccess = { messageList ->
                         // Sort messages by timestamp to ensure the prescription request is first
                         val sortedMessages = messageList.sortedBy { it.timestamp }
                         _messages.value = sortedMessages
-                        
+
                         // Log first message to verify it's the prescription request
                         if (sortedMessages.isNotEmpty()) {
                             val firstMessage = sortedMessages.first()
                             println("First message in chat $chatId: ${firstMessage.content} (has image: ${firstMessage.imageUrl != null})")
                         }
-                        
+
                         _uiState.value = _uiState.value.copy(isLoading = false)
                     },
                     onFailure = { error ->
@@ -167,6 +173,35 @@ class ChatViewModel(
         }
     }
 
+    fun sendMessageWithImage(imageFile: File, text: String) {
+        if (_currentChat.value == null) return
+
+        viewModelScope.launch {
+            try {
+                _isUploadingImage.value = true
+                val uploadResult = chatRepository.uploadImage(imageFile)
+                uploadResult.fold(
+                    onSuccess = { imageUrl ->
+                        chatRepository.sendMessage(
+                            chatId = _currentChat.value!!.id,
+                            senderId = currentUserId,
+                            content = text,
+                            imageUrl = imageUrl
+                        )
+                        _messageText.value = ""
+                    },
+                    onFailure = { error ->
+                        _uiState.value = _uiState.value.copy(error = error.message)
+                    }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            } finally {
+                _isUploadingImage.value = false
+            }
+        }
+    }
+
     fun claimChat(chatId: String) {
         viewModelScope.launch {
             try {
@@ -209,7 +244,11 @@ class ChatViewModel(
                                 receiverId = "", // Not available in WebSocket event
                                 content = event.event.content,
                                 timestamp = System.currentTimeMillis(), // Use current time for real-time messages
-                                messageType = if (!event.event.imageUrl.isNullOrBlank()) MessageType.IMAGE else MessageType.TEXT,
+                                messageType = when {
+                                    !event.event.imageUrl.isNullOrBlank() && event.event.content.isNotBlank() -> MessageType.TEXT_WITH_IMAGE
+                                    !event.event.imageUrl.isNullOrBlank() -> MessageType.IMAGE
+                                    else -> MessageType.TEXT
+                                },
                                 imageUrl = event.event.imageUrl
                             )
                             // Add new message and resort to maintain chronological order
@@ -217,24 +256,33 @@ class ChatViewModel(
                             _messages.value = updatedMessages
                         }
                     }
+
                     is WebSocketEvent.ChatCompleted -> {
                         if (_currentChat.value?.id == event.event.chatId) {
-                            _uiState.value = _uiState.value.copy(
-                                error = "Chat has been completed by the pharmacist"
-                            )
+                            _uiState.value = _uiState.value.copy(chatStatus = "COMPLETED",)
                             // Refresh current chat messages
                             loadMessages(event.event.chatId)
                         }
                     }
+
                     is WebSocketEvent.RequestClaimed -> {
                         // Refresh current chat if it's the one being claimed
                         if (_currentChat.value?.id == event.event.chatId) {
+                            _uiState.value = _uiState.value.copy(chatStatus = "CLAIMED")
                             loadMessages(event.event.chatId)
                         }
                     }
-                    is WebSocketEvent.Error -> {
-                        _uiState.value = _uiState.value.copy(error = event.message)
+
+                    is WebSocketEvent.PharmacistJoined -> {
+                        // Refresh current chat if it's the one pharmacist joined
+                        if (_currentChat.value?.id == event.event.chatId) {
+                            _uiState.value = _uiState.value.copy(chatStatus = "CLAIMED")
+                            loadMessages(event.event.chatId)
+                        }
                     }
+
+                    is WebSocketEvent.Error -> {}
+
                     else -> {
                         // Handle other events as needed
                     }
@@ -293,7 +341,8 @@ class ChatViewModel(
         viewModelScope.launch {
             chatRepository.getWebSocketConnectionStatus().collect { status ->
                 if (status == com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.DISCONNECTED ||
-                    status == com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.ERROR) {
+                    status == com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.ERROR
+                ) {
                     chatRepository.reconnectWebSockets(currentUserId, userRole, token)
                 }
             }
@@ -302,6 +351,26 @@ class ChatViewModel(
 
     fun disconnectWebSockets() {
         chatRepository.disconnectWebSockets()
+    }
+
+    fun completeChat(chatId: String) {
+        viewModelScope.launch {
+            try {
+                val result = chatRepository.updateChatStatus(chatId, "DONE")
+                result.fold(
+                    onSuccess = {
+                        _uiState.value = _uiState.value.copy(
+                            chatStatus = "DONE"
+                        )
+                    },
+                    onFailure = { error -> }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    error = "Failed to complete chat: ${e.message}"
+                )
+            }
+        }
     }
 
     override fun onCleared() {
@@ -313,5 +382,6 @@ class ChatViewModel(
 
 data class ChatUiState(
     val isLoading: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val chatStatus: String? = null
 )

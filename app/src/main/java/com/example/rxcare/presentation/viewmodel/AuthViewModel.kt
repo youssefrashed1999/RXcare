@@ -5,13 +5,17 @@ import androidx.lifecycle.viewModelScope
 import com.example.rxcare.domain.model.User
 import com.example.rxcare.domain.model.UserRole
 import com.example.rxcare.domain.repository.AuthRepository
+import com.example.rxcare.domain.repository.ChatRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-class AuthViewModel(private val authRepository: AuthRepository) : ViewModel() {
+class AuthViewModel(
+    private val authRepository: AuthRepository,
+    private val chatRepository: ChatRepository
+) : ViewModel() {
     
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
@@ -111,6 +115,9 @@ class AuthViewModel(private val authRepository: AuthRepository) : ViewModel() {
 
     fun signOut() {
         viewModelScope.launch {
+            // Disconnect WebSocket connections before logging out
+            chatRepository.disconnectWebSockets()
+            
             authRepository.logout()
             _currentUser.value = null
             _uiState.value = AuthUiState()

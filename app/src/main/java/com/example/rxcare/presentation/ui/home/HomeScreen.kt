@@ -1,5 +1,6 @@
 package com.example.rxcare.presentation.ui.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -8,6 +9,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.border
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonAdd
@@ -28,12 +32,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.dp as Dp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import java.io.File
@@ -43,14 +52,20 @@ import com.example.rxcare.domain.model.User
 import com.example.rxcare.domain.model.UserRole
 import com.example.rxcare.domain.model.RequestStatus
 import com.example.rxcare.domain.model.Request
-import com.example.rxcare.domain.model.RequestStatus.*
 import com.example.rxcare.domain.model.Chat
 import com.example.rxcare.presentation.viewmodel.HomeViewModel
 import com.example.rxcare.presentation.viewmodel.AuthViewModel
 import com.example.rxcare.presentation.ui.requests.PendingRequestsScreen
 import com.example.rxcare.presentation.ui.requests.ActiveRequestsScreen
 import com.example.rxcare.presentation.ui.requests.CompletedRequestsScreen
+import com.example.rxcare.presentation.ui.components.WebSocketLifecycleManager
+import com.example.rxcare.presentation.ui.components.StatusBadge
+import com.example.rxcare.presentation.ui.components.RequestCard
+import com.example.rxcare.ui.theme.*
 import androidx.compose.material.icons.filled.Circle
+import com.example.rxcare.presentation.ui.components.StatCard
+import com.example.rxcare.presentation.ui.components.TabChip
+import androidx.compose.ui.unit.dp
 
 enum class HomeTab(val title: String) {
     PENDING("Pending"),
@@ -63,7 +78,7 @@ enum class HomeTab(val title: String) {
 fun HomeScreen(
     homeViewModel: HomeViewModel,
     authViewModel: AuthViewModel,
-    onNavigateToChat: (String) -> Unit,
+    onNavigateToChat: (String, String, String?) -> Unit,
     onNavigateToSignIn: () -> Unit,
     onNavigateToCreatePharmacist: () -> Unit = {},
     currentUserRole: UserRole,
@@ -73,10 +88,15 @@ fun HomeScreen(
     val uiState by homeViewModel.uiState.collectAsState()
     val chats by homeViewModel.chats.collectAsState()
     val searchQuery by homeViewModel.searchQuery.collectAsState()
-    
+
     var selectedTab by remember { mutableStateOf(HomeTab.PENDING) }
     var selectedStatus by remember { mutableStateOf<RequestStatus?>(null) }
     var showNewRequestSheet by remember { mutableStateOf(false) }
+    var showClaimDialog by remember { mutableStateOf(false) }
+    var pendingClaimChatId by remember { mutableStateOf<String?>(null) }
+
+    // WebSocket lifecycle management
+    WebSocketLifecycleManager(homeViewModel = homeViewModel)
 
     // Both patients and pharmacists now use the same home screen
     PatientHomeScreen(
@@ -87,24 +107,75 @@ fun HomeScreen(
         currentUserRole = currentUserRole,
         currentUserName = currentUserName,
         onSearchQueryChange = { homeViewModel.searchChats(it) },
-        onStatusSelect = { status -> 
+        onStatusSelect = { status ->
             selectedStatus = status
-            // Refetch requests when status changes, especially for pharmacists
+            // Refetch requests when status changes, especially for pharmacists (silent loading)
             val statusString = when (status) {
                 RequestStatus.PENDING -> "PENDING"
                 RequestStatus.ACCEPTED -> "CLAIMED"
                 RequestStatus.COMPLETED -> "COMPLETED"
                 null -> null
             }
-            homeViewModel.loadRequests(statusString)
+            homeViewModel.loadRequests(statusString, silent = true)
         },
         onNewRequestClick = { showNewRequestSheet = true },
         onNewRequestDismiss = { showNewRequestSheet = false },
         onNavigateToChat = onNavigateToChat,
         onNavigateToSignIn = onNavigateToSignIn,
         onNavigateToCreatePharmacist = onNavigateToCreatePharmacist,
-        onClaimChat = onClaimChat
+        onClaimChat = onClaimChat,
+        showClaimDialog = showClaimDialog,
+        pendingClaimChatId = pendingClaimChatId,
+        onClaimDialogDismiss = { showClaimDialog = false },
+        onShowClaimDialog = { chatId ->
+            pendingClaimChatId = chatId
+            showClaimDialog = true
+        }
     )
+
+    // Claim Confirmation Dialog
+    if (showClaimDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showClaimDialog = false
+                pendingClaimChatId = null
+            },
+            title = {
+                Text("Claim Request")
+            },
+            text = {
+                Text("Do you want to claim this request?")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingClaimChatId?.let { chatId ->
+                            onClaimChat(chatId)
+                            // Find the chat to get participant2Id
+                            val chat = chats.find { it.id == chatId }
+                            chat?.let {
+                                onNavigateToChat(chatId, it.participant2Id, it.status)
+                            }
+                        }
+                        showClaimDialog = false
+                        pendingClaimChatId = null
+                    }
+                ) {
+                    Text("Claim")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showClaimDialog = false
+                        pendingClaimChatId = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -120,26 +191,58 @@ private fun PatientHomeScreen(
     onStatusSelect: (RequestStatus?) -> Unit,
     onNewRequestClick: () -> Unit,
     onNewRequestDismiss: () -> Unit,
-    onNavigateToChat: (String) -> Unit,
+    onNavigateToChat: (String, String, String?) -> Unit,
     onNavigateToSignIn: () -> Unit,
     onNavigateToCreatePharmacist: () -> Unit = {},
-    onClaimChat: (String) -> Unit = { chatId -> homeViewModel.claimChat(chatId) }
+    onClaimChat: (String) -> Unit = { chatId -> homeViewModel.claimChat(chatId) },
+    showClaimDialog: Boolean = false,
+    pendingClaimChatId: String? = null,
+    onClaimDialogDismiss: () -> Unit = {},
+    onShowClaimDialog: (String) -> Unit = {}
 ) {
     val uiState by homeViewModel.uiState.collectAsState()
     val chats by homeViewModel.chats.collectAsState()
     val connectionStatus by homeViewModel.connectionStatus.collectAsState()
+    
+    
+    
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    currentUserName?.let { name ->
-                        Text("Hi, $name")
-                    } ?: Text("Hi there")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Avatar circle with initials
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(
+                                    if (currentUserRole == UserRole.CLIENT) BrandPrimary else NavyPrimary,
+                                    CircleShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = currentUserName?.take(2)?.uppercase() ?: "U",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column {
+                            Text(
+                                text = "Hi, ${currentUserName ?: "there"}",
+                                style = MaterialTheme.typography.headlineSmall,
+                                color = TextPrimary
+                            )
+                        }
+                    }
                 },
                 actions = {
-                    // WebSocket connection status indicator
-                    ConnectionStatusIndicator(status = connectionStatus)
-                    
                     // Show create pharmacist button only for pharmacists
                     if (currentUserRole == UserRole.PHARMACIST) {
                         IconButton(onClick = onNavigateToCreatePharmacist) {
@@ -156,9 +259,28 @@ private fun PatientHomeScreen(
             // Only show FAB for patients
             if (currentUserRole == UserRole.CLIENT) {
                 FloatingActionButton(
-                    onClick = onNewRequestClick
+                    onClick = onNewRequestClick,
+                    modifier = Modifier.padding(horizontal = 18.dp),
+                    shape = ChipShape,
+                    containerColor = BrandPrimary
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "New Request")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "New Request",
+                            tint = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "New Request",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
         }
@@ -167,45 +289,71 @@ private fun PatientHomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(16.dp)
+                .padding(horizontal = 18.dp)
         ) {
+            // Stats row
+            val pendingCount = chats.filter { it.status == "PENDING" }.size
+            val claimedCount = chats.filter { it.status == "CLAIMED" }.size
+            val doneCount = chats.filter { it.status == "DONE" }.size
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // PENDING card
+                StatCard(
+                    count = pendingCount,
+                    label = "PENDING",
+                    color = AmberText,
+                    modifier = Modifier.weight(1f)
+                )
+
+                // CLAIMED card
+                StatCard(
+                    count = claimedCount,
+                    label = "CLAIMED",
+                    color = GreenText,
+                    modifier = Modifier.weight(1f)
+                )
+
+                // DONE card
+                StatCard(
+                    count = doneCount,
+                    label = "DONE",
+                    color = BlueText,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Tab bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Only show "All" button for patients
-                if (currentUserRole == UserRole.CLIENT) {
-                    FilterChip(
-                        onClick = { onStatusSelect(null) },
-                        label = { Text("All") },
-                        selected = selectedStatus == null
-                    )
-                }
-                FilterChip(
-                    onClick = { onStatusSelect(PENDING) },
-                    label = { Text("Pending") },
-                    selected = selectedStatus == PENDING
+                // Show "All" button for both patients and pharmacists
+                TabChip(
+                    onClick = { onStatusSelect(null) },
+                    label = "All",
+                    isSelected = selectedStatus == null
                 )
-                FilterChip(
-                    onClick = { onStatusSelect(ACCEPTED) },
-                    label = { Text("Active") },
-                    selected = selectedStatus == ACCEPTED
+                TabChip(
+                    onClick = { onStatusSelect(RequestStatus.PENDING) },
+                    label = "PENDING",
+                    isSelected = selectedStatus == RequestStatus.PENDING
                 )
-                FilterChip(
-                    onClick = { onStatusSelect(COMPLETED) },
-                    label = { Text("Completed") },
-                    selected = selectedStatus == COMPLETED
+                TabChip(
+                    onClick = { onStatusSelect(RequestStatus.ACCEPTED) },
+                    label = "CLAIMED",
+                    isSelected = selectedStatus == RequestStatus.ACCEPTED
+                )
+                TabChip(
+                    onClick = { onStatusSelect(RequestStatus.COMPLETED) },
+                    label = "DONE",
+                    isSelected = selectedStatus == RequestStatus.COMPLETED
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = onSearchQueryChange,
-                label = { Text("Search requests...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth()
-            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -213,32 +361,54 @@ private fun PatientHomeScreen(
             val filteredChats = when {
                 searchQuery.isNotBlank() -> uiState.searchResults
                 selectedStatus == null -> chats
-                selectedStatus == PENDING -> chats.filter { it.status == "PENDING" }
-                selectedStatus == ACCEPTED -> chats.filter { it.status == "CLAIMED" }
-                selectedStatus == COMPLETED -> chats.filter { it.status == "DONE" }
+                selectedStatus == RequestStatus.PENDING -> chats.filter { it.status == "PENDING" }
+                selectedStatus == RequestStatus.ACCEPTED -> chats.filter { it.status == "CLAIMED" }
+                selectedStatus == RequestStatus.COMPLETED -> chats.filter { it.status == "DONE" }
                 else -> chats
             }
 
-            if (filteredChats.isEmpty()) {
+            if (filteredChats.isEmpty() && !uiState.isLoading) {
                 EmptyRequestsState(
                     selectedStatus = selectedStatus,
                     searchQuery = searchQuery
                 )
+            } else if (uiState.isLoading) {
+                // Show loading indicator
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(filteredChats) { chat ->
-                        ChatListItem(
-                            chat = chat,
+                        RequestCard(
+                            chatId = chat.id,
+                            status = chat.status,
+                            title = chat.participant2Id.replace("patient_", "Patient ").replace("pharmacist_", "Pharmacist "),
+                            subtitle = chat.lastMessage?.content ?: "No messages yet",
+                            timestamp = formatTimestamp(chat.lastMessageTime),
                             currentUserRole = currentUserRole,
-                            onClick = { onNavigateToChat(chat.id) },
-                            onClaimChat = onClaimChat
+                            onAction = {
+                                // Always navigate to chat when clicking the card
+                                onNavigateToChat(chat.id, chat.participant2Id, chat.status)
+                            },
+                            onClaimAction = {
+                                // Show claim confirmation dialog
+                                if (currentUserRole == UserRole.PHARMACIST && chat.status == "PENDING") {
+                                    onShowClaimDialog(chat.id)
+                                }
+                            }
                         )
                     }
                 }
             }
-            
+
             // New Request Bottom Sheet
             if (showNewRequestSheet) {
                 NewRequestBottomSheet(
@@ -249,17 +419,7 @@ private fun PatientHomeScreen(
                     }
                 )
             }
-            
-            // Show loading indicator
-            if (uiState.isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            }
-            
+
             // Show error message
             uiState.error?.let { error ->
                 LaunchedEffect(error) {
@@ -267,7 +427,7 @@ private fun PatientHomeScreen(
                     kotlinx.coroutines.delay(3000)
                     homeViewModel.clearError()
                 }
-                
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -337,9 +497,9 @@ private fun ChatListItem(
                             )
                         }
                     }
-                    
+
                     Spacer(modifier = Modifier.width(12.dp))
-                    
+
                     Column {
                         Text(
                             text = chat.participant2Id.replace("patient_", "Patient ").replace("pharmacist_", "Pharmacist "),
@@ -347,9 +507,9 @@ private fun ChatListItem(
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        
+
                         Spacer(modifier = Modifier.height(4.dp))
-                        
+
                         chat.lastMessage?.let { message ->
                             Text(
                                 text = message.content,
@@ -361,7 +521,7 @@ private fun ChatListItem(
                         }
                     }
                 }
-                
+
                 Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     horizontalAlignment = Alignment.End
@@ -393,7 +553,7 @@ private fun ChatListItem(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                         )
                     }
-                    
+
                     // Claim button for pharmacists
                     if (currentUserRole == UserRole.PHARMACIST && chat.status == "PENDING" && onClaimChat != null) {
                         Button(
@@ -418,7 +578,7 @@ private fun ChatListItem(
                     }
                 }
             }
-            
+
             // Footer with metadata
             Spacer(modifier = Modifier.height(8.dp))
             Row(
@@ -431,7 +591,7 @@ private fun ChatListItem(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                
+
                 Row(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -440,7 +600,7 @@ private fun ChatListItem(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    
+
                     if (chat.isArchived) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Icon(
@@ -459,7 +619,7 @@ private fun ChatListItem(
 private fun formatTimestamp(timestamp: Long): String {
     val now = System.currentTimeMillis()
     val diff = now - timestamp
-    
+
     return when {
         diff < 60_000 -> "Just now"
         diff < 3_600_000 -> "${diff / 60_000}m ago"
@@ -478,11 +638,13 @@ private fun NewRequestBottomSheet(
 ) {
     var description by remember { mutableStateOf("") }
     var selectedImageUri by remember { mutableStateOf<String?>(null) }
-    var showImagePickerDialog by remember { mutableStateOf(false) }
-    
+
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
-    
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true
+    )
+
     // Create a temporary file for camera capture
     val photoFile = remember {
         File(
@@ -490,7 +652,7 @@ private fun NewRequestBottomSheet(
             "IMG_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg"
         )
     }
-    
+
     val photoUri = remember {
         FileProvider.getUriForFile(
             context,
@@ -498,7 +660,7 @@ private fun NewRequestBottomSheet(
             photoFile
         )
     }
-    
+
     // Gallery picker launcher
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -507,7 +669,7 @@ private fun NewRequestBottomSheet(
             selectedImageUri = it.toString()
         }
     }
-    
+
     // Camera launcher
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -516,24 +678,20 @@ private fun NewRequestBottomSheet(
             selectedImageUri = photoUri.toString()
         }
     }
-    
+
     val isSubmitEnabled = description.isNotBlank() || selectedImageUri != null
-    
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(
-            skipPartiallyExpanded = true
-        ),
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+        sheetState = sheetState,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) } // Remove default insets to handle keyboard manually
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(24.dp)
-                .clickable(
-                    indication = null,
-                    interactionSource = remember { MutableInteractionSource() }
-                ) { focusManager.clearFocus() }
+                .verticalScroll(rememberScrollState()) // Make content scrollable
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -545,14 +703,14 @@ private fun NewRequestBottomSheet(
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold
                 )
-                
+
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Default.Close, contentDescription = "Close")
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(16.dp))
-            
+
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
@@ -562,12 +720,12 @@ private fun NewRequestBottomSheet(
                 minLines = 3,
                 maxLines = 5
             )
-            
+
             Spacer(modifier = Modifier.height(16.dp))
-            
+
             // Image upload section
             Card(
-                onClick = { showImagePickerDialog = true },
+                onClick = { galleryLauncher.launch("image/*") },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -612,11 +770,11 @@ private fun NewRequestBottomSheet(
                     }
                 }
             }
-            
+
             Spacer(modifier = Modifier.height(24.dp))
-            
+
             Button(
-                onClick = { 
+                onClick = {
                     onSubmit(description, selectedImageUri)
                 },
                 enabled = isSubmitEnabled,
@@ -624,56 +782,11 @@ private fun NewRequestBottomSheet(
             ) {
                 Text("Submit Request")
             }
-            
+
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
-    
-    // Image picker dialog
-    if (showImagePickerDialog) {
-        AlertDialog(
-            onDismissRequest = { showImagePickerDialog = false },
-            title = { Text("Select Image") },
-            text = {
-                Column {
-                    TextButton(
-                        onClick = {
-                            galleryLauncher.launch("image/*")
-                            showImagePickerDialog = false
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            Icons.Default.PhotoLibrary,
-                            contentDescription = null,
-                            modifier = Modifier.padding(end = 8.dp)
-                        )
-                        Text("Choose from Gallery")
-                    }
-                    
-                    TextButton(
-                        onClick = {
-                            cameraLauncher.launch(photoUri)
-                            showImagePickerDialog = false
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(
-                            Icons.Default.CameraAlt,
-                            contentDescription = null,
-                            modifier = Modifier.padding(end = 8.dp)
-                        )
-                        Text("Take Photo")
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showImagePickerDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
+
 }
 
 @Composable
@@ -694,28 +807,28 @@ private fun EmptyRequestsState(
             modifier = Modifier.size(64.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
         )
-        
+
         Text(
             text = when {
                 searchQuery.isNotBlank() -> "No requests found"
                 selectedStatus == null -> "No requests yet"
-                selectedStatus == PENDING -> "No pending requests"
-                selectedStatus == ACCEPTED -> "No active requests"
-                selectedStatus == COMPLETED -> "No completed requests"
+                selectedStatus == RequestStatus.PENDING -> "No pending requests"
+                selectedStatus == RequestStatus.ACCEPTED -> "No active requests"
+                selectedStatus == RequestStatus.COMPLETED -> "No completed requests"
                 else -> "No requests found"
             },
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.Medium
         )
-        
+
         Text(
             text = when {
                 searchQuery.isNotBlank() -> "Try adjusting your search terms"
                 selectedStatus == null -> "Create your first request to get started"
-                selectedStatus == PENDING -> "All requests have been accepted or completed"
-                selectedStatus == ACCEPTED -> "No requests are currently active"
-                selectedStatus == COMPLETED -> "No requests have been completed yet"
+                selectedStatus == RequestStatus.PENDING -> "All requests have been accepted or completed"
+                selectedStatus == RequestStatus.ACCEPTED -> "No requests are currently active"
+                selectedStatus == RequestStatus.COMPLETED -> "No requests have been completed yet"
                 else -> "Check back later for new requests"
             },
             style = MaterialTheme.typography.bodyMedium,

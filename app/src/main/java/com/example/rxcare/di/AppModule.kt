@@ -30,7 +30,7 @@ val appModule = module {
     single<DomainChatRepository> { ChatRepositoryImpl(get(), get(), androidContext()) }
     
     // ViewModels
-    viewModel { AuthViewModel(get()) }
+    viewModel { AuthViewModel(get(), get()) }
     viewModel { (currentUserId: String) -> HomeViewModel(get(), currentUserId) }
     viewModel { (currentUserId: String) -> ChatViewModel(get(), currentUserId) }
 }

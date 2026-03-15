@@ -22,7 +22,7 @@ import java.util.*
 @Composable
 fun ActiveRequestsScreen(
     activeRequests: List<com.example.rxcare.domain.model.Chat>,
-    onNavigateToChat: (String) -> Unit
+    onNavigateToChat: (String, String?) -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -54,7 +54,7 @@ fun ActiveRequestsScreen(
                 items(activeRequests) { chat ->
                     ActiveRequestCard(
                         chat = chat,
-                        onNavigateToChat = { onNavigateToChat(chat.id) }
+                        onNavigateToChat = { onNavigateToChat(chat.id, chat.status) }
                     )
                 }
             }

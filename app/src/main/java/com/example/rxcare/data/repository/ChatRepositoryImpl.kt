@@ -109,6 +109,10 @@ class ChatRepositoryImpl(
         webSocketClient.sendMessage(chatId, senderId, content, imageUrl)
     }
     
+    override fun ping() {
+        webSocketClient.ping()
+    }
+    
     override suspend fun getAuthToken(): String {
         return preferencesManager.accessToken.first() ?: ""
     }

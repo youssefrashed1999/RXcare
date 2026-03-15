@@ -21,7 +21,7 @@ import java.util.*
 @Composable
 fun PendingRequestsScreen(
     pendingRequests: List<com.example.rxcare.domain.model.Chat>,
-    onNavigateToChat: (String) -> Unit
+    onNavigateToChat: (String, String?) -> Unit
 ) {
     Scaffold(
         topBar = {
@@ -53,7 +53,7 @@ fun PendingRequestsScreen(
                 items(pendingRequests) { chat ->
                     PendingRequestCard(
                         chat = chat,
-                        onNavigateToChat = { onNavigateToChat(chat.id) }
+                        onNavigateToChat = { onNavigateToChat(chat.id, chat.status) }
                     )
                 }
             }

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 
@@ -18,6 +19,43 @@ class HomeViewModel(
     private val chatRepository: ChatRepository,
     private val currentUserId: String
 ) : ViewModel() {
+    
+    // Handle new WebSocket messages immediately
+    private fun handleNewMessage(event: WebSocketEvent.NewMessage) {
+        val currentChats = _chats.value
+        val updatedChats = mutableListOf<Chat>()
+        var updatedChat: Chat? = null
+        
+        currentChats.forEach { chat ->
+            if (chat.id == event.event.chatId) {
+                val receiverId = if (event.event.senderId == currentUserId) {
+                    chat.participant2Id
+                } else {
+                    currentUserId
+                }
+                updatedChat = chat.copy(
+                    lastMessage = Message(
+                        id = event.event.messageId,
+                        chatId = event.event.chatId,
+                        senderId = event.event.senderId,
+                        receiverId = receiverId,
+                        content = event.event.content,
+                        timestamp = parseTimestamp(event.event.timestamp),
+                        imageUrl = event.event.imageUrl
+                    ),
+                    lastMessageTime = parseTimestamp(event.event.timestamp)
+                )
+            } else {
+                // Only add chats that don't match the updated chat
+                updatedChats.add(chat)
+            }
+        }
+        
+        // Add the updated chat to the top if it was found
+        updatedChat?.let { updatedChats.add(0, it) }
+        
+        _chats.value = updatedChats
+    }
     
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -45,10 +83,23 @@ class HomeViewModel(
     }
 
     init {
-        loadRequests()
         initializeWebSocketConnection()
+        loadRequests()
         listenToWebSocketEvents()
         listenToConnectionStatus()
+        startPingTimer()
+    }
+    
+    private fun startPingTimer() {
+        viewModelScope.launch {
+            while (true) {
+                delay(60000) // 1 minute
+                val currentStatus = connectionStatus.value
+                if (currentStatus == com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.CONNECTED) {
+                    chatRepository.ping()
+                }
+            }
+        }
     }
     
     private fun initializeWebSocketConnection() {
@@ -84,18 +135,64 @@ class HomeViewModel(
     }
     
     fun claimChat(chatId: String) {
-        chatRepository.claimChat(chatId, currentUserId)
+        viewModelScope.launch {
+            try {
+                val result = chatRepository.updateChatStatus(chatId, "CLAIMED")
+                result.fold(
+                    onSuccess = {
+                        _uiState.value = _uiState.value.copy(
+                            error = "Request claimed successfully"
+                        )
+                        // Refresh the chat list to show updated status
+                        loadRequests()
+                    },
+                    onFailure = { error ->
+                        _uiState.value = _uiState.value.copy(
+                            error = "Failed to claim request: ${error.message}"
+                        )
+                    }
+                )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    error = "Failed to claim request: ${e.message}"
+                )
+            }
+        }
     }
 
     private fun listenToConnectionStatus() {
         viewModelScope.launch {
             chatRepository.getWebSocketConnectionStatus().collect { status ->
                 _connectionStatus.value = status
-                if (status == com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.ERROR) {
-                    _uiState.value = _uiState.value.copy(
-                        error = "WebSocket connection lost. Attempting to reconnect..."
-                    )
+                when (status) {
+                    com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.ERROR,
+                    com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.DISCONNECTED -> {
+                        // Silent reconnection - don't notify UI
+                        attemptReconnection()
+                    }
+                    com.example.rxcare.data.remote.websocket.WebSocketClient.ConnectionStatus.CONNECTED -> {
+                        // Clear any previous errors silently
+                        _uiState.value = _uiState.value.copy(error = null)
+                    }
+                    else -> { /* Other statuses */ }
                 }
+            }
+        }
+    }
+    
+    private fun attemptReconnection() {
+        viewModelScope.launch {
+            try {
+                // Wait a bit before reconnecting to avoid rapid reconnections
+                kotlinx.coroutines.delay(3000)
+                val token = chatRepository.getAuthToken()
+                val role = chatRepository.getUserRole()
+                
+                if (token.isNotEmpty() && role.isNotEmpty()) {
+                    reconnectWebSockets(role, token)
+                }
+            } catch (e: Exception) {
+                // Silent failure - don't notify UI
             }
         }
     }
@@ -104,17 +201,36 @@ class HomeViewModel(
         chatRepository.disconnectWebSockets()
     }
 
+    suspend fun getAuthToken(): String {
+        return chatRepository.getAuthToken()
+    }
+
+    suspend fun getUserRole(): String {
+        return chatRepository.getUserRole()
+    }
+
     private fun listenToWebSocketEvents() {
         viewModelScope.launch {
             chatRepository.getWebSocketEvents().collect { event ->
                 when (event) {
+                    is WebSocketEvent.NewMessage -> {
+                        handleNewMessage(event)
+                    }
                     is WebSocketEvent.NewPrescriptionRequest -> {
                         // Add new request to the list
                         val newChat = Chat(
                             id = event.event.chatId,
                             participant1Id = currentUserId,
-                            participant2Id = "patient_${event.event.chatId}", // Generate ID since patientId not available
-                            lastMessage = null,
+                            participant2Id = event.event.patientName, // Generate ID since patientId not available
+                            lastMessage = Message(
+                                id = event.event.chatId,
+                                senderId = event.event.patientName,
+                                content = event.event.notes,
+                                imageUrl = event.event.imageUrl,
+                                timestamp = parseTimestamp(event.event.timestamp),
+                                chatId = event.event.chatId,
+                                receiverId = event.event.chatId
+                            ),
                             lastMessageTime = parseTimestamp(event.event.timestamp),
                             status = "PENDING"
                         )
@@ -135,61 +251,31 @@ class HomeViewModel(
                             }
                         } else {
                             // Add new chat to the list
-                            _chats.value = currentChats + newChat
+                            _chats.value = listOf(newChat) + currentChats
                         }
                     }
                     is WebSocketEvent.RequestClaimed -> {
                         // Update chat when claimed
-                        _chats.value = _chats.value.map { chat ->
-                            if (chat.id == event.event.chatId) {
-                                chat.copy(
-                                    lastMessageTime = parseTimestamp(event.event.timestamp),
-                                    status = "CLAIMED"
-                                )
-                            } else chat
-                        }
-                    }
-                    is WebSocketEvent.NewMessage -> {
-                        // Update last message for the chat
-                        _chats.value = _chats.value.map { chat ->
-                            if (chat.id == event.event.chatId) {
-                                val receiverId = if (event.event.senderId == currentUserId) {
-                                    chat.participant2Id
-                                } else {
-                                    currentUserId
-                                }
-                                chat.copy(
-                                    lastMessage = com.example.rxcare.domain.model.Message(
-                                        id = event.event.messageId,
-                                        chatId = event.event.chatId,
-                                        senderId = event.event.senderId,
-                                        receiverId = receiverId,
-                                        content = event.event.content,
-                                        timestamp = parseTimestamp(event.event.timestamp),
-                                        imageUrl = event.event.imageUrl
-                                    ),
-                                    lastMessageTime = parseTimestamp(event.event.timestamp)
-                                )
-                            } else chat
-                        }
+                        loadRequests()
                     }
                     is WebSocketEvent.ChatCompleted -> {
-                        // Mark chat as archived when completed
                         _chats.value = _chats.value.map { chat ->
                             if (chat.id == event.event.chatId) {
                                 chat.copy(
                                     isArchived = true,
-                                    lastMessageTime = parseTimestamp(event.event.timestamp)
+                                    lastMessageTime = parseTimestamp(event.event.timestamp),
+                                    status = "DONE"
                                 )
                             } else chat
                         }
                     }
                     is WebSocketEvent.PharmacistJoined -> {
-                        // Update chat when pharmacist joins
                         _chats.value = _chats.value.map { chat ->
                             if (chat.id == event.event.chatId) {
                                 chat.copy(
-                                    lastMessageTime = parseTimestamp(event.event.timestamp)
+                                    lastMessageTime = parseTimestamp(event.event.timestamp),
+                                    participant2Id = event.event.pharmacistName,
+                                    status = "CLAIMED"
                                 )
                             } else chat
                         }
@@ -202,41 +288,60 @@ class HomeViewModel(
         }
     }
 
-    fun loadRequests(status: String? = null) {
+    fun loadRequests(status: String? = null, silent: Boolean = false) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true)
+            if (!silent) {
+                _uiState.value = _uiState.value.copy(isLoading = true)
+            }
             try {
-                // Determine status based on user role
-                val effectiveStatus = when (_userRole.value) {
-                    "PHARMACIST" -> {
-                        // Pharmacists only see PENDING requests by default
-                        if (status == null) "PENDING" else status
-                    }
-                    "PATIENT" -> {
-                        // Patients can see all their requests
-                        status
-                    }
-                    else -> status
-                }
-                
-                val result = chatRepository.getRequests(effectiveStatus)
-                result.fold(
-                    onSuccess = { chatList ->
-                        _chats.value = chatList
+                if (_userRole.value == "PHARMACIST") {
+                    // For pharmacists, load all 3 request types separately
+                    val allRequests = mutableListOf<Chat>()
+                    
+                    // Load PENDING requests
+                    val pendingResult = chatRepository.getRequests("PENDING")
+                    pendingResult.onSuccess { allRequests.addAll(it) }
+                    
+                    // Load CLAIMED requests  
+                    val claimedResult = chatRepository.getRequests("CLAIMED")
+                    claimedResult.onSuccess { allRequests.addAll(it) }
+                    
+                    // Load DONE requests
+                    val doneResult = chatRepository.getRequests("DONE")
+                    doneResult.onSuccess { allRequests.addAll(it) }
+                    
+                    // Sort by timestamp (newest first)
+                    _chats.value = allRequests.sortedByDescending { it.lastMessageTime }
+                    if (!silent) {
                         _uiState.value = _uiState.value.copy(isLoading = false)
-                    },
-                    onFailure = { error ->
-                        _uiState.value = _uiState.value.copy(
-                            isLoading = false,
-                            error = error.message
-                        )
                     }
-                )
+                } else {
+                    // For patients, use the provided status
+                    val result = chatRepository.getRequests(status)
+                    result.fold(
+                        onSuccess = { chatList ->
+                            _chats.value = chatList
+                            if (!silent) {
+                                _uiState.value = _uiState.value.copy(isLoading = false)
+                            }
+                        },
+                        onFailure = { error ->
+                            if (!silent) {
+                                _uiState.value = _uiState.value.copy(
+                                    isLoading = false,
+                                    error = error.message
+                                )
+                            }
+                        }
+                    )
+                }
             } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    error = e.message
-                )
+                if (!silent) {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = e.message
+                    )
+                }
             }
         }
     }
@@ -290,34 +395,7 @@ class HomeViewModel(
                     onSuccess = { prescriptionResponse ->
                         _uiState.value = _uiState.value.copy(isLoading = false)
                         
-                        // Create a new chat object and add it to the list immediately
-                        // The response contains both chatId and status from the API
-                        val newChat = Chat(
-                            id = prescriptionResponse.chatId,
-                            participant1Id = currentUserId,
-                            participant2Id = "New Prescription Request",
-                            lastMessage = Message(
-                                id = "temp_${System.currentTimeMillis()}",
-                                chatId = prescriptionResponse.chatId,
-                                senderId = currentUserId,
-                                receiverId = "",
-                                content = description,
-                                timestamp = System.currentTimeMillis(),
-                                messageType = MessageType.TEXT,
-                                imageUrl = imageUri,
-                                isRead = false,
-                                isDelivered = false
-                            ),
-                            lastMessageTime = System.currentTimeMillis(),
-                            unreadCount = 0,
-                            isArchived = false,
-                            status = prescriptionResponse.status
-                        )
-                        
-                        // Add the new chat to the beginning of the list
-                        _chats.value = listOf(newChat) + _chats.value
-                        
-                        // Also refresh the chat list to get the latest data
+                        // Just refresh the chat list to get the proper timestamp from server
                         loadRequests()
                     },
                     onFailure = { error ->

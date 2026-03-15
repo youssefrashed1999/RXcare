@@ -78,8 +78,8 @@ fun RxCareNavigation(
             HomeScreen(
                 homeViewModel = homeViewModel,
                 authViewModel = authViewModel,
-                onNavigateToChat = { chatId ->
-                    navController.navigate(Screen.Chat.createRoute(chatId))
+                onNavigateToChat = { chatId, participant2Id, status ->
+                    navController.navigate(Screen.Chat.createRoute(chatId, participant2Id, status))
                 },
                 onNavigateToSignIn = {
                     authViewModel.signOut()
@@ -97,12 +97,17 @@ fun RxCareNavigation(
 
         composable(Screen.Chat.route) { backStackEntry ->
             val chatId = backStackEntry.arguments?.getString("chatId") ?: return@composable
+            val participant2Id = backStackEntry.arguments?.getString("participant2Id") ?: ""
+            val initialStatus = backStackEntry.arguments?.getString("initialStatus")
             ChatScreen(
                 chatId = chatId,
                 userId = currentUser?.id ?: "",
+                participant2Id = participant2Id,
                 onNavigateBack = {
                     navController.popBackStack()
-                }
+                },
+                currentUser = currentUser,
+                initialStatus = initialStatus
             )
         }
 
@@ -126,8 +131,9 @@ sealed class Screen(val route: String) {
     object SignIn : Screen("sign_in")
     object SignUp : Screen("sign_up")
     object Home : Screen("home")
-    object Chat : Screen("chat/{chatId}") {
-        fun createRoute(chatId: String) = "chat/$chatId"
+    object Chat : Screen("chat/{chatId}?participant2Id={participant2Id}&initialStatus={initialStatus}") {
+        fun createRoute(chatId: String, participant2Id: String, initialStatus: String? = null) = 
+            "chat/$chatId?participant2Id=$participant2Id${if (initialStatus != null) "&initialStatus=$initialStatus" else ""}"
     }
     object CreatePharmacist : Screen("create_pharmacist")
 }

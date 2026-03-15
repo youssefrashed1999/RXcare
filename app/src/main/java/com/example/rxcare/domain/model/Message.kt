@@ -15,5 +15,7 @@ data class Message(
 
 enum class MessageType {
     TEXT,
-    IMAGE
+    IMAGE,
+    TEXT_WITH_IMAGE,
+    SYSTEM
 }
